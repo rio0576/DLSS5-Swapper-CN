@@ -1,0 +1,14 @@
+# 构建用的中间产物，不入库
+work/
+dist/
+
+# 依赖与临时文件
+node_modules/
+*.tmp
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini

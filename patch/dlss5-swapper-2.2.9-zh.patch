@@ -1,0 +1,952 @@
+diff --git a/main.js b/main.js
+index cdd2665..3482314 100644
+--- a/main.js
++++ b/main.js
+@@ -37,6 +37,10 @@ const compatibility = require('./src/core/compatibility');
+ const antiCheatWarning = require('./src/shared/anti-cheat-warning');
+ const featureI18n = require('./src/shared/feature-i18n');
+ const featureText = (key, ...args) => featureI18n.t(loadState().lang, key, ...args);
++// Windows draws the native dialogs itself, so they cannot come from i18n.js.
++// Only the strings passed through here are translated; everything else in a
++// dialog stays as it was.
++const uiText = (zh, en) => (String(loadState().lang || 'en').toLowerCase().startsWith('zh') ? zh : en);
+ const vulkanLayer = require('./src/core/vulkan-layer');
+ const { HistoryStore, knownFolders, fromManifests } = require('./src/core/history');
+ const gameMenu = require('./src/core/game-menu');
+@@ -449,14 +453,14 @@ app.whenReady().then(async () => {
+   if (!singleInstance) return;
+   // Registered here rather than at load: main.js is exercised in a plain vm
+   // context by the tests, where src modules are stubbed and cannot be called.
+-  require('./src/overlay-ipc')({ app, ipcMain, dialog, shell, window: () => win, bridge: () => overlayBridge });
++  require('./src/overlay-ipc')({ app, ipcMain, dialog, shell, window: () => win, bridge: () => overlayBridge, language: () => loadState().lang });
+   createWindow();
+   // The icon is there from launch, not only after the first close - somebody
+   // who wants the app parked in the tray wants to see that it is.
+   if (loadState().closeToTray !== false) ensureTray();
+   if (communityUsed()) startNotices();
+   try {
+-    overlayBridge = await require('./src/overlay-bridge')({ BrowserWindow, userData: app.getPath('userData') });
++    overlayBridge = await require('./src/overlay-bridge')({ BrowserWindow, userData: app.getPath('userData'), language: () => loadState().lang || 'en' });
+     if (quitting) overlayBridge.close();
+   } catch (error) {
+     if (!quitting) console.error('Overlay bridge:', error.message);
+@@ -505,6 +509,9 @@ ipcMain.handle('set-lang', (_event, lang) => {
+   const state = loadState();
+   state.lang = lang;
+   saveState(state);
++  // The in-game panel is a separate window and is built from a dictionary, so
++  // it has to be told; it re-mounts itself.
++  try { overlayBridge?.setLanguage?.(); } catch {}
+   return lang;
+ });
+ 
+@@ -570,12 +577,13 @@ ipcMain.handle('save-diagnostics', async (event, dir, activity) => {
+   const found = diagnostics.sources({ gameDir: dir, exeDir, userData });
+   const list = found.length
+     ? found.map(item => `\u2022 ${item.file}  (${Math.ceil(item.bytes / 1024)} KB)`).join('\n')
+-    : 'No log files were found for this game yet.';
++    : uiText('还没有找到这个游戏的日志文件。', 'No log files were found for this game yet.');
+   const consent = await dialog.showMessageBox(window, {
+-    type: 'question', title: 'Save diagnostics',
+-    message: 'These files will be copied into one text file:',
+-    detail: `${list}\n\nIt also records the app version, your GPU and driver, and this session's activity log. Game folder paths appear in it. Read it before attaching it anywhere.`,
+-    buttons: ['Cancel', 'Choose where to save'], defaultId: 1, cancelId: 0
++    type: 'question', title: uiText('保存诊断信息', 'Save diagnostics'),
++    message: uiText('这些文件会被复制到同一个文本文件中：', 'These files will be copied into one text file:'),
++    detail: uiText(`${list}\n\n其中还会记录程序版本、你的显卡与驱动，以及本次会话的活动日志。文件里包含游戏文件夹路径，转发给别人之前请先读一遍。`,
++      `${list}\n\nIt also records the app version, your GPU and driver, and this session's activity log. Game folder paths appear in it. Read it before attaching it anywhere.`),
++    buttons: [uiText('取消', 'Cancel'), uiText('选择保存位置', 'Choose where to save')], defaultId: 1, cancelId: 0
+   });
+   if (consent.response !== 1) return { ok: false, cancelled: true };
+ 
+@@ -592,9 +600,9 @@ ipcMain.handle('save-diagnostics', async (event, dir, activity) => {
+ 
+   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+   const picked = await dialog.showSaveDialog(window, {
+-    title: 'Save diagnostics',
++    title: uiText('保存诊断信息', 'Save diagnostics'),
+     defaultPath: path.join(app.getPath('documents'), `dlss5-swapper-diagnostics-${stamp}.txt`),
+-    filters: [{ name: 'Text', extensions: ['txt'] }]
++    filters: [{ name: uiText('文本文件', 'Text'), extensions: ['txt'] }]
+   });
+   if (picked.canceled || !picked.filePath) return { ok: false, cancelled: true };
+   try {
+@@ -799,8 +807,8 @@ ipcMain.handle('community-chat-save-image', async (event, source, suggestedName)
+     const window = BrowserWindow.fromWebContents(event.sender);
+     const safeName = String(suggestedName || 'dlss5-chat-image').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 80) || 'dlss5-chat-image';
+     const picked = await dialog.showSaveDialog(window, {
+-      title: 'Save chat image', defaultPath: path.join(app.getPath('pictures'), `${safeName}.webp`),
+-      filters: [{ name: 'WebP image', extensions: ['webp'] }]
++      title: uiText('保存聊天图片', 'Save chat image'), defaultPath: path.join(app.getPath('pictures'), `${safeName}.webp`),
++      filters: [{ name: uiText('WebP 图片', 'WebP image'), extensions: ['webp'] }]
+     });
+     if (picked.canceled || !picked.filePath) return { ok: false, cancelled: true };
+     const response = await fetch(target, { redirect: 'error', signal: AbortSignal.timeout(30_000) });
+@@ -1119,7 +1127,7 @@ ipcMain.handle('scan', async (_event, dir) => {
+ // ---------- editing the library ----------
+ 
+ ipcMain.handle('add-folder', async () => {
+-  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: 'Scan this folder for games' });
++  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: uiText('选择要扫描的游戏文件夹', 'Scan this folder for games') });
+   if (res.canceled) return null;
+   const state = loadState();
+   if (!state.folders.includes(res.filePaths[0])) state.folders.push(res.filePaths[0]);
+@@ -1164,7 +1172,7 @@ ipcMain.handle('exclude-root', (_event, dir) => {
+ });
+ 
+ ipcMain.handle('add-game', async () => {
+-  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: 'Add one game' });
++  const res = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: uiText('添加一个游戏', 'Add one game') });
+   if (res.canceled) return null;
+   const state = loadState();
+   if (!state.manual.includes(res.filePaths[0])) state.manual.push(res.filePaths[0]);
+@@ -1175,8 +1183,8 @@ ipcMain.handle('add-game', async () => {
+ ipcMain.handle('set-poster', async (_event, dir) => {
+   const res = await dialog.showOpenDialog(win, {
+     properties: ['openFile'],
+-    title: 'Pick a poster',
+-    filters: [{ name: 'Images', extensions: ['jpg', 'jpeg', 'png', 'webp'] }]
++    title: uiText('选择封面图片', 'Pick a poster'),
++    filters: [{ name: uiText('图片', 'Images'), extensions: ['jpg', 'jpeg', 'png', 'webp'] }]
+   });
+   if (res.canceled) return null;
+ 
+@@ -1388,8 +1396,8 @@ ipcMain.handle('addon-toggle', (_event, file, on) => {
+ // the window is filled in and confirmed.
+ ipcMain.handle('addon-pick', async () => {
+   const res = await dialog.showOpenDialog(win, {
+-    title: 'Add an add-on build',
+-    filters: [{ name: 'ReShade add-on', extensions: ['addon64', 'addon'] }],
++    title: uiText('添加插件版本', 'Add an add-on build'),
++    filters: [{ name: uiText('ReShade 插件', 'ReShade add-on'), extensions: ['addon64', 'addon'] }],
+     properties: ['openFile']
+   });
+   if (res.canceled || !res.filePaths.length) return null;
+diff --git a/overlay-preload.js b/overlay-preload.js
+index 1184f01..295d69b 100644
+--- a/overlay-preload.js
++++ b/overlay-preload.js
+@@ -2,6 +2,7 @@
+ const { contextBridge, ipcRenderer } = require('electron');
+ contextBridge.exposeInMainWorld('overlayRuntime', {
+   onPreferences:fn=>ipcRenderer.on('lab-overlay-preferences',(_event,value)=>fn(value)),
++  onLanguage: fn => { ipcRenderer.on('lab-overlay-language', (_event, code) => fn(code)); },
+   onStatus: fn => { const callback = (_event, status) => fn(status); ipcRenderer.on('lab-overlay-status', callback); },
+   setControl: command => ipcRenderer.send('lab-overlay-control', command),
+   resize: height => ipcRenderer.send('lab-overlay-resize', height)
+diff --git a/src/overlay-bridge.js b/src/overlay-bridge.js
+index c7b2d06..b4951ec 100644
+--- a/src/overlay-bridge.js
++++ b/src/overlay-bridge.js
+@@ -7,7 +7,7 @@ const protocol = require('./overlay-protocol');
+ const preferences=require('./overlay-preferences');
+ const { ipcMain } = require('electron');
+ 
+-module.exports = async function startOverlayBridge({ BrowserWindow, userData, idleTakeoverMs = 5000 }) {
++module.exports = async function startOverlayBridge({ BrowserWindow, userData, idleTakeoverMs = 5000, language = () => 'en' }) {
+   const token = crypto.randomBytes(16).toString('hex');
+   const endpoint = path.join(userData, 'overlay-bridge.endpoint');
+   // The add-on composes the same name from LAB_OVERLAY_PROFILE (see
+@@ -26,6 +26,9 @@ module.exports = async function startOverlayBridge({ BrowserWindow, userData, id
+   const win = new BrowserWindow({ show: false, width: protocol.WIDTH, height: 900, transparent: true, frame: false,
+     webPreferences: { preload: path.join(__dirname, '../overlay-preload.js'), offscreen: true, contextIsolation: true, sandbox: true, nodeIntegration: false, backgroundThrottling: false, spellcheck: false } });
+   const preferenceChanged=(dir,value)=>{if(dir===userData&&!closed&&!win.isDestroyed())win.webContents.send('lab-overlay-preferences',value);};
++  // The panel is a separate window with no access to the app's i18n, so the
++  // language travels on its own channel. It re-mounts on a change.
++  const sendLanguage = () => { if (!closed && !win.isDestroyed()) win.webContents.send('lab-overlay-language', String(language() || 'en')); };
+   const control = (event, command) => {
+     if (closed || !client || event.sender !== win.webContents) return;
+     if (Date.now() - commandTime > 1000) { commandTime = Date.now(); commandCount = 0; }
+@@ -86,6 +89,7 @@ module.exports = async function startOverlayBridge({ BrowserWindow, userData, id
+   win.on('closed', close);
+   try {
+   await win.loadFile(path.join(__dirname, 'renderer/overlay-panel.html'));
++  sendLanguage();
+   win.webContents.send('lab-overlay-preferences',preferences.read(userData));
+   preferences.events.on('change',preferenceChanged);
+   const height = Math.ceil(await win.webContents.executeJavaScript(`document.querySelector('#panel').getBoundingClientRect().height`));
+@@ -179,5 +183,5 @@ module.exports = async function startOverlayBridge({ BrowserWindow, userData, id
+     endpoint,
+     pipeName
+   });
+-  return { window: win, endpoint, pipeName, state, getFrame: () => latest, getStatus:()=>runtimeStatus, close };
++  return { window: win, endpoint, pipeName, state, getFrame: () => latest, getStatus:()=>runtimeStatus, setLanguage: sendLanguage, close };
+ };
+diff --git a/src/overlay-ipc.js b/src/overlay-ipc.js
+index 6431057..82668df 100644
+--- a/src/overlay-ipc.js
++++ b/src/overlay-ipc.js
+@@ -2,8 +2,10 @@
+ const path = require('node:path');
+ const { createOverlayLibrary } = require('./overlays');
+ 
+-module.exports = function registerOverlayIpc({ app, ipcMain, dialog, shell, window, bridge = () => null }) {
++module.exports = function registerOverlayIpc({ app, ipcMain, dialog, shell, window, bridge = () => null, language = () => 'en' }) {
+   const appRoot = path.resolve(__dirname, '..');
++  // These are Windows dialogs, so they cannot come from i18n.js.
++  const uiText = (zh, en) => (String(language() || 'en').toLowerCase().startsWith('zh') ? zh : en);
+   // Installed, the built add-on rides along as an extra resource; from source it
+   // is whatever scripts/build-overlay.ps1 last produced.
+   const builtin = () => (app.isPackaged
+@@ -35,33 +37,34 @@ module.exports = function registerOverlayIpc({ app, ipcMain, dialog, shell, wind
+   handle('preferences',()=>require('./overlay-preferences').read(app.getPath('userData')));
+   handle('save-preferences',patch=>require('./overlay-preferences').save(app.getPath('userData'),patch));
+   handle('add', async () => {
+-    const picked = await dialog.showOpenDialog(window(), { title: 'Add a custom ReShade overlay', properties: ['openFile'], filters: [{ name: 'ReShade native add-ons', extensions: ['addon64', 'addon32'] }] });
++    const picked = await dialog.showOpenDialog(window(), { title: uiText('添加自定义 ReShade 叠加层', 'Add a custom ReShade overlay'), properties: ['openFile'], filters: [{ name: uiText('ReShade 原生插件', 'ReShade native add-ons'), extensions: ['addon64', 'addon32'] }] });
+     if (picked.canceled) return null;
+-    const confirm = await dialog.showMessageBox(window(), { type: 'warning', title: 'Native add-on — trusted developers only',
+-      message: 'This file contains native code. A ReShade add-on can access your files when loaded by a game.',
+-      detail: 'Adding it here only stores a copy; it is not executed here. A checksum does not certify that the file is safe.',
+-      buttons: ['Cancel', 'Add trusted file'], defaultId: 0, cancelId: 0 });
++    const confirm = await dialog.showMessageBox(window(), { type: 'warning', title: uiText('原生插件 —— 仅限可信来源', 'Native add-on — trusted developers only'),
++      message: uiText('这个文件包含原生代码。ReShade 插件被游戏加载后可以访问你的文件。', 'This file contains native code. A ReShade add-on can access your files when loaded by a game.'),
++      detail: uiText('在这里添加只是保存一份副本，不会在本程序里运行它。校验值并不能证明文件是安全的。', 'Adding it here only stores a copy; it is not executed here. A checksum does not certify that the file is safe.'),
++      buttons: [uiText('取消', 'Cancel'), uiText('添加可信文件', 'Add trusted file')], defaultId: 0, cancelId: 0 });
+     return confirm.response === 1 ? library().add(picked.filePaths[0]) : null;
+   });
+   handle('remove', async id => {
+     const entry = library().resolve(id);
+     if (entry.builtin) throw Error('The built-in overlay cannot be deleted.');
+-    const confirm = await dialog.showMessageBox(window(), { type: 'question', message: `Remove ${entry.name}?`, detail: 'Your original imported file is kept.', buttons: ['Cancel', 'Remove'], defaultId: 0, cancelId: 0 });
++    const confirm = await dialog.showMessageBox(window(), { type: 'question', message: uiText(`要移除 ${entry.name} 吗？`, `Remove ${entry.name}?`), detail: uiText('你最初导入的文件会被保留。', 'Your original imported file is kept.'), buttons: [uiText('取消', 'Cancel'), uiText('移除', 'Remove')], defaultId: 0, cancelId: 0 });
+     if (confirm.response === 1) library().remove(id);
+   });
+   handle('install', async id => {
+     const entry = library().resolve(id);
+     if (!entry.ready) throw Error('Build the experimental add-on first (see Developer files).');
+-    const picked = await dialog.showOpenDialog(window(), { title: 'Select a CLOSED offline test game with ReShade add-on support', properties: ['openFile'], filters: [{ name: 'Windows game executable', extensions: ['exe'] }] });
++    const picked = await dialog.showOpenDialog(window(), { title: uiText('选择一个已关闭、支持 ReShade 插件的离线测试游戏', 'Select a CLOSED offline test game with ReShade add-on support'), properties: ['openFile'], filters: [{ name: uiText('Windows 游戏可执行文件', 'Windows game executable'), extensions: ['exe'] }] });
+     if (picked.canceled) return null;
+-    const confirm = await dialog.showMessageBox(window(), { type: 'warning', title: 'Overlay test — not a DLSS installation',
+-      message: 'Confirm the game is closed and already uses ReShade with add-on support. Keep DLSS 5 Swapper open while testing the built-in overlay.',
+-      detail: `${picked.filePaths[0]}\n\nOnly a uniquely named overlay add-on is copied next to this executable. No existing DLLs or configuration files are replaced by installation. No Vulkan registry changes. Avoid online / anti-cheat games.\n\nThis overlay automatically connects through an undocumented, exact-build v4.7 adapter that temporarily redirects its UI dispatch. This may be incompatible with other add-ons. RenoDX itself saves settings you change. This is not NVIDIA's official SDK or overlay.`,
+-      buttons: ['Cancel', 'Install test overlay'], defaultId: 0, cancelId: 0 });
++    const confirm = await dialog.showMessageBox(window(), { type: 'warning', title: uiText('叠加层测试 —— 这不是 DLSS 安装', 'Overlay test — not a DLSS installation'),
++      message: uiText('请确认游戏已关闭，并且已经在使用支持插件的 ReShade。测试内置叠加层期间请保持 DLSS 5 Swapper 运行。', 'Confirm the game is closed and already uses ReShade with add-on support. Keep DLSS 5 Swapper open while testing the built-in overlay.'),
++      detail: uiText(`${picked.filePaths[0]}\n\n只会在该可执行文件旁复制一个唯一命名的叠加层插件，不会替换任何已有的 DLL 或配置文件，也不会改动 Vulkan 注册表。请避开联网 / 反作弊游戏。\n\n这个叠加层通过一个未公开、绑定确切版本的 v4.7 适配器自动连接，并会临时改写它的 UI 分发。这可能与其他插件不兼容。你修改的设置由 RenoDX 自己保存。这不是 NVIDIA 官方 SDK 或官方叠加层。`,
++        `${picked.filePaths[0]}\n\nOnly a uniquely named overlay add-on is copied next to this executable. No existing DLLs or configuration files are replaced by installation. No Vulkan registry changes. Avoid online / anti-cheat games.\n\nThis overlay automatically connects through an undocumented, exact-build v4.7 adapter that temporarily redirects its UI dispatch. This may be incompatible with other add-ons. RenoDX itself saves settings you change. This is not NVIDIA's official SDK or overlay.`),
++      buttons: [uiText('取消', 'Cancel'), uiText('安装测试叠加层', 'Install test overlay')], defaultId: 0, cancelId: 0 });
+     return confirm.response === 1 ? library().install(id, picked.filePaths[0]) : null;
+   });
+   handle('uninstall', async id => {
+-    const confirm = await dialog.showMessageBox(window(), { type: 'question', message: 'Is the test game closed?', detail: 'Remove only the unchanged overlay this app copied. Keep ReShade, DLSS, presets, and every original file.', buttons: ['Cancel', 'Remove test overlay'], defaultId: 0, cancelId: 0 });
++    const confirm = await dialog.showMessageBox(window(), { type: 'question', message: uiText('测试游戏已经关闭了吗？', 'Is the test game closed?'), detail: uiText('只移除本程序复制过去、且未被修改过的叠加层。ReShade、DLSS、预设以及所有原始文件都会保留。', 'Remove only the unchanged overlay this app copied. Keep ReShade, DLSS, presets, and every original file.'), buttons: [uiText('取消', 'Cancel'), uiText('移除测试叠加层', 'Remove test overlay')], defaultId: 0, cancelId: 0 });
+     if (confirm.response === 1) library().uninstall(id);
+   });
+   handle('source', async () => {
+diff --git a/src/renderer/chat.js b/src/renderer/chat.js
+index be91a64..8d9f2f4 100644
+--- a/src/renderer/chat.js
++++ b/src/renderer/chat.js
+@@ -554,6 +554,10 @@
+     const w = words();
+     const map = { navChat:'nav',chatTitle:'title',chatSubtitle:'subtitle',chatRetention:'retention',chatRefresh:'refresh',chatOlder:'older',chatComposeHint:'hint',chatAttachTitle:'share',chatGameSearchLabel:'findGame' };
+     for (const [id,key] of Object.entries(map)) if ($(id)) $(id).textContent = w[key];
++    // The sidebar is on screen no matter which page is open, so its label
++    // follows the app language even though this module's own strings do not
++    // have a Chinese table yet. Languages without one keep the old wording.
++    if ($('navChat') && window.i18n?.t?.('navChat') !== 'navChat') $('navChat').textContent = window.i18n.t('navChat');
+     $('chatInput').placeholder = w.placeholder; $('chatGameSearch').placeholder = w.findPlaceholder;
+     $('chatEmpty').innerHTML = `<i>💬</i><b>${esc(w.emptyTitle)}</b><span>${esc(w.emptyBody)}</span>`;
+     $('chatChoosePhotos').querySelector('b').textContent = w.photos; $('chatChoosePhotos').querySelector('span').textContent = w.photosSub;
+diff --git a/src/renderer/i18n.js b/src/renderer/i18n.js
+index 5495fd7..10b2c24 100644
+--- a/src/renderer/i18n.js
++++ b/src/renderer/i18n.js
+@@ -63,7 +63,12 @@ const S = {
+     hideConfirm: (name) => `Hide ${name} from the list? Nothing on disk changes and any installation stays. You can bring it back from Settings.`,
+     optiDownloading: 'Downloading and verifying OptiScaler…', optiVerified: (version) => `Official OptiScaler release verified: ${version}.`,
+     backendSwitching: 'Saving settings and switching backend…', backendRecovered: 'Interrupted switch recovered.',
+-    navHome: 'Home', navGames: 'Games', navCommunity: 'Community', navHistory: 'History', navSettings: 'Settings', navAbout: 'About',
++    navHome: 'Home', navGames: 'Games', navChat: 'Chat', navCommunity: 'Community', navHistory: 'History', navSettings: 'Settings', navAbout: 'About',
++    logFound: (n, s) => `Found ${n} games across ${s} sources`,
++    logScanning: (dir) => `Scanning: ${dir}`,
++    logGame: (exe, api) => `Game: ${exe} (${api})`,
++    logInstalled: (dir) => `Installed: ${dir}`,
++    logRestored: (dir) => `Restored: ${dir}`,
+     navOverlay: 'Overlay',
+     ready: 'Ready', scanning: 'Scanning…', fetchingArt: 'Fetching art…',
+     unsupportedRendererHint: 'Native DirectX 10 is not supported by Feeder. Select the game’s DirectX 11 mode if available. This renderer cannot be installed automatically.',
+@@ -384,7 +389,12 @@ The install will go through. If the neural pass never appears in game, 616.56 is
+     artFound: (a, b) => `الصور: ${a} من ${b}`, libReady: (n, d) => `المكتبة جاهزة — ${n} لعبة، ${d} على DirectX 12`
+   },
+   zh: {
+-    navHome: '主页', navGames: '游戏', navHistory: '历史', navSettings: '设置', navAbout: '关于',
++    navHome: '主页', navGames: '游戏', navChat: '聊天', navHistory: '历史', navSettings: '设置', navAbout: '关于',
++    logFound: (n, s) => `已扫描到 ${n} 个游戏，来自 ${s} 个来源`,
++    logScanning: (dir) => `正在扫描：${dir}`,
++    logGame: (exe, api) => `游戏：${exe}（${api}）`,
++    logInstalled: (dir) => `已安装：${dir}`,
++    logRestored: (dir) => `已还原：${dir}`,
+     navOverlay: '叠加层',
+     ready: '就绪', scanning: '扫描中…', fetchingArt: '获取封面…',
+     dropTitle: '将游戏文件夹拖到这里', or: '或', browse: '浏览文件夹',
+@@ -411,7 +421,85 @@ The install will go through. If the neural pass never appears in game, 616.56 is
+     setPosters: '封面', setSaved: (n) => `已保存 ${n} 个`, setLang: '语言',
+     aboutTitle: 'DLSS 5 Swapper', aboutBody: '为你的游戏装上 DLSS 5，也能随时还原。', aboutBy: '由 Rakan Alkhaldi 开发',
+     agoNow: '刚刚', agoMin: (n) => `${n} 分钟前`, agoHour: (n) => `${n} 小时前`, agoDay: (n) => `${n} 天前`,
+-    artFound: (a, b) => `封面：${b} 个中找到 ${a} 个`, libReady: (n, d) => `库已就绪 — ${n} 个游戏，${d} 个使用 DirectX 12`
++    artFound: (a, b) => `封面：${b} 个中找到 ${a} 个`, libReady: (n, d) => `库已就绪 — ${n} 个游戏，${d} 个使用 DirectX 12`,
++    navCommunity: '社区',
++    updateAvailable: (version) => `有可用更新：v${version} ↗`,
++    updateCheckFailed: () => '无法检查更新 —— 这不代表「已是最新版本」。',
++    feedVkLayerReady: (rel) => `Vulkan 互操作层已安装。如果游戏里没有出现 DLSS 5，请通过 ${rel} 启动。`,
++    neuralModelKept: (rel) => `保留了你自己原有的 ${rel}；没有用自带模型覆盖它。`,
++    restoreRecovered: (date) => `没找到有效的备份记录，因此正在用它旁边保留的那份备份还原（${date}）。它记录的文件仍在游戏里。`,
++    forwarderRetired: (rel) => `已移除另一版本留下的转发器（${rel}）。本版本直接连接神经渲染运行时，残留的转发器会静默地让整条通道失效。点「还原原文件」可以把它放回去。`,
++    setHidden: '已隐藏的游戏', setHiddenNone: '没有隐藏任何游戏。', setUnhide: '重新显示',
++    hideTitle: '隐藏这个游戏？',
++    hideConfirm: (name) => `从列表中隐藏 ${name}？磁盘上不会有任何改动，已安装的内容也会保留。之后可以在设置里把它找回来。`,
++    optiDownloading: '正在下载并校验 OptiScaler…', optiVerified: (version) => `官方 OptiScaler 发布包已校验：${version}。`,
++    backendSwitching: '正在保存设置并切换后端…', backendRecovered: '已从中断的切换中恢复。',
++    copyLog: '复制日志', copyHistory: '复制历史', copied: '已复制到剪贴板',
++    saveDiagnostics: '保存诊断信息', notesTitle: '关于这个游戏的说明', notesWarning: '警告 —— 安装前请先阅读',
++    diagnosticsSaved: (n) => `诊断信息已保存，含 ${n} 个日志文件。请把它附在你的反馈里。`,
++    menuDetails: '查看游戏详情', menuOpen: '打开游戏文件夹', menuCopyPath: '复制文件夹路径',
++    menuScan: '重新扫描这个游戏', menuPoster: '更换封面',
++    menuCommunity: '加入社区已验证游戏', menuCommunityEdit: '编辑我的社区报告', menuCommunityRemove: '删除我的社区报告',
++    menuCommunityRemoved: (name) => `已删除 ${name} 的社区报告`,
++    menuHide: '从库中隐藏（保留文件）',
++    menuConfirmRestore: '要还原这个游戏的原始文件吗？',
++    menuRestoreHint: '请先关闭游戏。Swapper 安装的文件会被删除，备份的原始文件会被还原。',
++    menuNoBackup: '这个游戏没有可用的有效备份。',
++    menuScanned: name => `扫描已更新：${name}`,
++    menuActionFailed: (name, error) => `${name}：${error}`,
++    historySnapshot: '备份记录', historyRecovered: '已从中断的操作中恢复',
++    overlaySkipped: (error) => `不会安装游戏内叠加层：${error}。其余安装过程照常继续。`,
++    errNoWriteAccess: 'Windows 不允许本程序写入游戏文件夹，因此没有任何改动。安装在 Program Files 下的游戏受保护：请以管理员身份运行 DLSS 5 Swapper，或把游戏移到其他文件夹。',
++    sheetCommunityTitle: '社区反馈结果', sheetCommunityOpen: '查看报告',
++    sheetCommunityNone: '这个游戏还没有社区报告 —— 安装之后，你可能就是第一个。',
++    sheetCommunityCounts: (reports, comments) => `${reports} 条报告 · ${comments} 条评论`,
++    communityWorking: '可用', communityMixed: '部分可用', communityBroken: '不可用',
++    overlayNotForRoute: (why, api) => `不会安装游戏内叠加层：${why === 'bits' ? '它只支持 64 位游戏，而这个游戏是 32 位' : why === 'multipass' ? 'multipass 路线在游戏内有自己的页面（按 Home 打开）。叠加层适用于原生 DLSS（RenoDX）与 Feeder' : why === 'optiscaler' ? 'OptiScaler 在游戏内有自己的菜单（按 Insert 打开）。叠加层适用于原生 DLSS（RenoDX）与 Feeder' : `它只支持 DirectX 11 和 12，而这个游戏运行在 ${api}`}。其余安装过程照常继续。`,
++    multipassNext: (dlss) => dlss === 'yes'
++      ? 'Multipass 已安装。进入游戏后按 Home，打开 RenoDX 的 DLSS 标签页（最后一个标签，不是 Home 页），Pass Count 和其他所有设置都在那里。请保持游戏自身设置里的 DLSS 处于开启状态。'
++      : 'Multipass 已安装。进入游戏后按 Home，打开 RenoDX 的 DLSS 标签页（最后一个标签，不是 Home 页）。这个游戏本身没有 DLSS，所以请在那里关闭 Require DLSS，并把 Hook Method 设为 Present。Pass Count 也在同一个标签页。',
++    t2SetupTitle: '设置 DLSS 5', t2Cards: '卡片', t2List: '列表', t2Signal: '社区信号',
++    t2System: '系统 / 实时', t2Updated: '已更新', t2ViewAll: '查看全部',
++    t2Search: '搜索游戏、启动器或文件夹…', t2SearchHint: '输入游戏名或页面',
++    t2Move: '移动', t2Open: '打开', t2Page: '页面', t2NoMatch: '没有同名内容',
++    t2Play: '开始游戏', t2PlayFailed: '无法从这里启动这个游戏。',
++    t2About: '关于', t2Setup: 'DLSS 5 设置', t2Ready: '可以安装', t2NotReady: '暂不可用',
++    t2SetupNote: '选择以哪种方式把 DLSS 5 装进这个游戏。所有选择只对这一个游戏生效，并且会被保存。',
++    t2SetupInstalled: '这个游戏已安装 DLSS 5。再次安装可以更换安装路线，或还原原始文件。',
++    t2InstallHint: '请先关闭游戏。「还原原文件」会把一切恢复成原样。',
++    t2Folder: '游戏文件夹', t2OpenFolder: '打开文件夹', t2NoAbout: '没有找到这个游戏的说明。',
++    t2Launcher: '平台', t2Released: '发行日期', t2Genres: '类型', t2Rating: '评分',
++    t2Close: '关闭', t2Dismiss: '关闭',
++    railCollapse: '把侧边栏收起为图标', railExpand: '保持侧边栏展开',
++    sheetSetup: 'DLSS 设置', sheetFacts: '详情', sheetFiles: '这个游戏里的文件', sheetActivity: '活动',
++    setSkins: '主题风格', setSkinsHint: '整套界面有两套设计。无论选哪一套，浅色与深色都依然有效。',
++    skinOne: '主题 1 · 经典', skinOneHint: '程序一直以来的外观。',
++    skinTwo: '主题 2 · 光圈', skinTwoHint: '编辑式工作区：横向导航、电影化的游戏页面与更精细的动效。',
++    setSafeGraphics: '安全图形模式',
++    setSafeGraphicsHint: '如果窗口闪烁，或者总是残留之前的画面，请打开它。该模式不使用显卡绘制，下次启动程序时生效。',
++    fReshadeFile: 'ReShade 文件',
++    reshadeProxyWrapHint: 'ReShade 以 d3d11.dll 而非 dxgi.dll 的方式安装。这个游戏通过 dgVoodoo 包装层访问 DirectX 11，某些配置下该层只加载 d3d11.dll —— 如果游戏能启动却看不到叠加层、也没有生成 ReShade.log，可以试试这个。',
++    reshadeProxyHint: 'ReShade 以 d3d11.dll 而非 dxgi.dll 的方式安装。适用于会忽略 dxgi.dll 的 DirectX 11 游戏。如果游戏已经装好，点「安装」会帮你换成这种方式。',
++    rRendererInDll: '渲染器在单独的 DLL 里 —— 暂时不支持',
++    fOptiBuild: 'OptiScaler 版本', optiBuildCurrent: '当前',
++    routeRenodx: 'RenoDX DLSS Tool（multipass）',
++    routeRenodxHint: 'ShortFuse 的 DLSS Tool 版本。它挂钩 Present，因此可用于本身没有 DLSS 的游戏，并且每帧运行 1 到 10 次神经渲染通道 —— Pass Count 在 RenoDX 自己的页面（Home）里设置。它会替换普通的 RenoDX 消费端，两者不能同时加载。',
++    errMultipassMissing: '本版本没有附带 RenoDX DLSS Tool 插件。',
++    multipassConfigured: 'DLSS Tool 已设为挂钩 Present，不要求 DLSS',
++    multipassHint: 'multipass 消费端每帧运行神经渲染通道不止一次。它会替换普通消费端 —— 两者不能同时加载，本次安装会帮你把文件换好。',
++    driverFaultTitle: '这个驱动可能无法运行神经渲染通道',
++    driverFaultBody: (names) => `${names}
++
++616.64 及更新的驱动在上游实测中，会在 NVIDIA 自己的神经渲染运行时内部出错。也有很多人用更新的驱动完全没问题，尤其是在关闭 MSI Afterburner 和 RivaTuner 之后。
++
++安装会照常进行。如果游戏里始终不出现神经渲染通道，616.56 是已知可用的最后一个驱动版本。`,
++    driverFaultGo: '仍然安装', driverFaultStopped: '已停止 —— 未接受该驱动',
++    setTray: '关闭窗口后继续在系统托盘运行',
++    setTrayHint: '关闭窗口时只是隐藏到托盘，而不是退出。要真正退出请用托盘菜单里的「退出」。',
++    trayShow: '打开 DLSS 5 Swapper', trayQuit: '退出',
++    setNotices: '社区通知',
++    setNoticesHint: '当有人回复我的评论、提到我，或评论我关注的游戏时通知我。',
++    supportBody: 'DLSS 5 Swapper 是免费且以 MIT 许可开源的。如果它帮你省下了一个折腾的晚上，可以请我喝杯咖啡 —— 或者用手机扫码。'
+   },
+   es: {
+     navHome: 'Inicio', navGames: 'Juegos', navHistory: 'Historial', navSettings: 'Ajustes', navAbout: 'Acerca de',
+diff --git a/src/renderer/index.html b/src/renderer/index.html
+index b620f2a..4068674 100644
+--- a/src/renderer/index.html
++++ b/src/renderer/index.html
+@@ -28,7 +28,7 @@
+         </button>
+         <button class="nav-item" data-view="chat">
+           <svg viewBox="0 0 24 24"><path d="M5 5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H9l-5 3v-4.5A2 2 0 0 1 3 15V7a2 2 0 0 1 2-2z"/><path d="M7 10h10M7 14h6"/></svg>
+-          <span id="navChat">Chat</span><i class="dot"></i><b class="chat-nav-unread hidden" id="chatNavUnread"></b>
++          <span id="navChat" data-i18n="navChat">Chat</span><i class="dot"></i><b class="chat-nav-unread hidden" id="chatNavUnread"></b>
+         </button>
+         <button class="nav-item" data-view="community">
+           <svg viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.7M16 3.3a4 4 0 0 1 0 7.4"/></svg>
+@@ -227,7 +227,7 @@
+       <!-- SETTINGS -->
+       <section class="view" id="view-overlays" aria-label="Overlay">
+         <div class="section-head">
+-          <div><h3>Overlay <span class="ol-badge">BETA</span></h3><p class="hint" id="olSubtitle"></p></div>
++          <div><h3><span id="olTitle">Overlay</span> <span class="ol-badge">BETA</span></h3><p class="hint" id="olSubtitle"></p></div>
+           <div class="row ol-toolbar"><label class="ol-install-switch"><input type="checkbox" role="switch" id="olEnabled"><span id="olEnabledLabel">Install with DLSS</span></label><button class="ghost sm" id="olSource">Developer files</button><button class="ghost sm" id="olHotkey">Hotkey · F8</button><button class="ghost sm" id="olCustom">Create theme</button><button class="glass-btn sm" id="olAdd">＋ Add</button></div>
+         </div>
+         <p id="olStatus" role="status" aria-live="polite"></p>
+@@ -246,7 +246,7 @@
+           <p id="olCustomError" role="status"></p>
+           <div class="row"><button id="olCustomCancel" class="ghost">Cancel</button><button id="olCustomSave" class="glass-btn">Save</button></div>
+         </dialog>
+-        <dialog id="olHotkeyDialog" class="ol-dialog ol-hotkey-dialog"><h3>Overlay hotkey</h3><p id="olKeyHelp">Click the field, then press your shortcut. Ctrl, Alt and Shift are supported. Home / Escape stay reserved for ReShade.</p><button id="olKeyCapture" class="ghost">F8</button><p id="olKeyError" role="status"></p><div class="row"><button id="olKeyCancel" class="ghost">Cancel</button><button id="olKeySave" class="glass-btn">Save</button></div></dialog>
++        <dialog id="olHotkeyDialog" class="ol-dialog ol-hotkey-dialog"><h3 id="olKeyTitle">Overlay hotkey</h3><p id="olKeyHelp">Click the field, then press your shortcut. Ctrl, Alt and Shift are supported. Home / Escape stay reserved for ReShade.</p><button id="olKeyCapture" class="ghost">F8</button><p id="olKeyError" role="status"></p><div class="row"><button id="olKeyCancel" class="ghost">Cancel</button><button id="olKeySave" class="glass-btn">Save</button></div></dialog>
+       </section>
+ 
+       <section class="view" id="view-settings">
+@@ -356,6 +356,7 @@
+   <div id="gameMenu" class="ctx-menu hidden" role="menu" aria-hidden="true"></div>
+   <div id="copyFeedback" class="copy-feedback hidden" role="status" aria-live="polite"></div>
+ 
++  <script src="overlay-i18n.js"></script>
+   <script src="overlay-panel.js"></script>
+   <script src="overlay-live.js"></script>
+   <script src="overlay-gallery.js"></script>
+diff --git a/src/renderer/overlay-gallery.js b/src/renderer/overlay-gallery.js
+index 1730cb6..168f9ee 100644
+--- a/src/renderer/overlay-gallery.js
++++ b/src/renderer/overlay-gallery.js
+@@ -1,6 +1,11 @@
+ 'use strict';
+ (()=>{
+-const $=id=>document.getElementById(id),text=(en,ar)=>document.documentElement.lang==='ar'?ar:en;
++const $=id=>document.getElementById(id);
++// Chinese comes from the shared overlay dictionary in overlay-i18n.js, which
++// index.html loads ahead of this file. English and Arabic keep working exactly
++// as before, so this page gains a language instead of trading one for another.
++const isZh=()=>String(document.documentElement.lang||'en').toLowerCase().startsWith('zh');
++const text=(en,ar)=>isZh()?(window.overlayI18n?window.overlayI18n.OT(en):en):(document.documentElement.lang==='ar'?ar:en);
+ const esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ const builtInThemes=[['green','Emerald','الأخضر'],['blue','Azure','الأزرق'],['purple','Amethyst','البنفسجي']];
+ // The saved custom theme sits alongside the built-in three; its label is
+@@ -19,8 +24,10 @@ async function render(){
+  const run=++generation,[r,s]=await Promise.all([window.lab.overlays(),window.lab.overlayPreferences()]);if(run!==generation)return;
+  if(!r.ok||!s.ok){$('olStatus').textContent=r.error||s.error;return;}prefs=s.value;
+  $('olSubtitle').textContent=text('Choose your style. Preview it, then make it yours.','اختر ثيمك، جرّبه في المعاينة، ثم حدده.');
+- $('olEnabled').checked=prefs.enabled;$('olEnabledLabel').textContent=text('Install overlay with DLSS','تثبيت الأوفرلاي مع DLSS');$('olHotkey').textContent=`Hotkey · ${keyLabel(prefs.hotkey)}`;
+- $('olAdd').textContent=text('＋ Add Overlay','＋ إضافة أوفرلاي');$('olSource').textContent=text('Developer files','ملفات المطورين');dispose();
++ $('olTitle').textContent=text('Overlay','أوفرلاي');
++ const badge=document.querySelector('#view-overlays .ol-badge');if(badge&&isZh())badge.textContent='测试版';
++ $('olEnabled').checked=prefs.enabled;$('olEnabledLabel').textContent=text('Install overlay with DLSS','تثبيت الأوفرلاي مع DLSS');$('olHotkey').textContent=`${text('Hotkey','اختصار')} · ${keyLabel(prefs.hotkey)}`;
++ $('olAdd').textContent=text('＋ Add Overlay','＋ إضافة أوفرلاي');$('olSource').textContent=text('Developer files','ملفات المطورين');$('olCustom').textContent=text('Create a theme','إنشاء ثيم');dispose();
+  $('olThemeGallery').innerHTML=themeList().map(([id,en,ar])=>`<article class="ol-theme-card ${prefs.theme===id?'selected':''}" data-overlay-theme="${id}"><div class="ol-card-stage"><div class="ol-static-panel" inert aria-hidden="true"></div></div><div class="ol-theme-bottom"><h3>${text(en,ar)}</h3><div class="ol-actions"><button class="ol-select" data-ol-action="select" data-id="${id}" aria-pressed="${prefs.theme===id}">${prefs.theme===id?text('✓ Selected','✓ محدد'):text('Select','اختيار')}</button>${button('preview',id,text('◉ Preview','◉ معاينة'))}${id==='custom'?`<button class="drop" data-ol-action="delete-theme" data-id="custom" title="${text('Delete this theme','حذف هذا الثيم')}" aria-label="${text('Delete this theme','حذف هذا الثيم')}"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>`:''}</div></div></article>`).join('');
+  for(const root of document.querySelectorAll('.ol-static-panel')){window.mountOverlayLive(root,{designOnly:true});root.querySelectorAll('.ol-live-modes,.ol-preview-backend').forEach(e=>e.remove());root.querySelectorAll('[id]').forEach(e=>e.removeAttribute('id'));root.querySelectorAll('[for]').forEach(e=>e.removeAttribute('for'));}
+  observer=new ResizeObserver(entries=>{for(const {target} of entries){const width=target.clientWidth;if(target.dataset.width===String(width))continue;target.dataset.width=width;requestAnimationFrame(()=>{if(!target.isConnected)return;const scale=width/534;target.firstElementChild.style.transform=`scale(${scale})`;target.style.height=`${target.firstElementChild.scrollHeight*scale}px`;});}});document.querySelectorAll('.ol-card-stage').forEach(e=>observer.observe(e));
+@@ -43,7 +50,9 @@ async function showBridge(){
+  // game will ever attach, and it used to leave the page saying "ready".
+  if(state&&state.addon===false){
+   box.dataset.state='off';
+-  box.textContent=text(
++  box.textContent=isZh()
++   ? `本程序内缺少叠加层插件，任何游戏都无法加载它：${state.addonFile||''}。杀毒软件会删除这个文件——请从杀毒软件的隔离区恢复它并添加排除项，或重新安装 DLSS 5 Swapper。`
++   : text(
+    `The overlay add-on is missing from this app, so no game can load it: ${state.addonFile||''}. Antivirus software removes this file - restore it from your antivirus quarantine and add an exclusion, or reinstall DLSS 5 Swapper.`,
+    `ملف الأوفرلاي مفقود من البرنامج، فلا تستطيع أي لعبة تحميله: ${state.addonFile||''}. برامج الحماية تحذف هذا الملف - استعده من الحجر الصحي وأضف استثناءً، أو أعد تثبيت البرنامج.`);
+   return;
+@@ -97,7 +106,11 @@ $('olCustomSave').onclick=async()=>{
+   if(await save({custom:{accent:$('olCustomColour').value,name},theme:'custom'})){$('olCustomDialog').close();render();}
+   else $('olCustomError').textContent=$('olStatus').textContent;
+ };
+-$('olHotkey').onclick=()=>{draft={...prefs.hotkey};$('olKeyCapture').textContent=keyLabel(draft);$('olKeyError').textContent='';$('olHotkeyDialog').showModal();$('olKeyCapture').focus();};
++$('olHotkey').onclick=()=>{draft={...prefs.hotkey};$('olKeyCapture').textContent=keyLabel(draft);$('olKeyError').textContent='';
++ $('olKeyTitle').textContent=text('Overlay hotkey','اختصار الأوفرلاي');
++ $('olKeyHelp').textContent=text('Click the field, then press your shortcut. Ctrl, Alt and Shift are supported. Home / Escape stay reserved for ReShade.','انقر الحقل ثم اضغط اختصارك. يدعم Ctrl و Alt و Shift. يبقى Home / Escape محجوزين لـ ReShade.');
++ $('olKeyCancel').textContent=text('Cancel','إلغاء');$('olKeySave').textContent=text('Save','حفظ');
++ $('olHotkeyDialog').showModal();$('olKeyCapture').focus();};
+ $('olKeyCapture').onkeydown=e=>{if(e.key==='Tab'||e.key==='Escape')return;e.preventDefault();e.stopPropagation();
+  const key=/^Key[A-Z]$/.test(e.code)?e.code.charCodeAt(3):/^Digit[0-9]$/.test(e.code)?e.code.charCodeAt(5):/^F([1-9]|1[0-9]|2[0-4])$/.test(e.code)?111+Number(e.code.slice(1)):({Space:32,PageUp:33,PageDown:34,End:35,ArrowLeft:37,ArrowUp:38,ArrowRight:39,ArrowDown:40,Insert:45,Delete:46}[e.code]);
+  if(!key||e.metaKey){$('olKeyError').textContent=text('Reserved / unsupported key. Try F9 or Ctrl + Shift + O.','زر محجوز أو غير مدعوم. جرّب F9 أو Ctrl + Shift + O.');return;}
+diff --git a/src/renderer/overlay-i18n.js b/src/renderer/overlay-i18n.js
+new file mode 100644
+index 0000000..f8ecdea
+--- /dev/null
++++ b/src/renderer/overlay-i18n.js
+@@ -0,0 +1,195 @@
++'use strict';
++// Chinese strings for the compact in-game panel and the Overlay page.
++// English is the key: anything missing here falls back to the original
++// English, so a gap shows up as English rather than as a blank panel.
++//
++// Two places load this file and they get their language from different
++// sources: the in-game surface is a separate window that has no i18n.js and
++// learns the language over its IPC channel, while the Overlay page's preview
++// runs inside the main window where window.i18n already knows it.
++(function () {
++  const ZH = {
++    // ---- panel chrome -------------------------------------------------
++    'DLSS 5 SWAPPER CONTROLS': 'DLSS 5 画质交换器 · 控制面板',
++    'DLSS 5 SWAPPER · INJECTED TOOLS': 'DLSS 5 画质交换器 · 注入工具',
++    PREVIEW: '预览', CONNECTED: '已连接', 'NOT CONNECTED': '未连接',
++    DISCONNECTED: '未连接', 'LIVE RESHADE': 'RESHADE 实时',
++    'Preview only': '仅预览', 'RenoDX live': 'RenoDX 实时', 'Waiting for RenoDX': '等待 RenoDX',
++    'Waiting for game connection': '等待游戏连接',
++    'Shows DLSS 5 On/Off over the game': '在游戏画面上显示 DLSS 5 开 / 关状态',
++    // ---- panel sections ------------------------------------------------
++    'DLSS ON': 'DLSS 神经渲染 开',
++    'ON-SCREEN STATUS': '游戏内状态角标',
++    'GLOBAL CONTROLS': '全局控制',
++    MODELS: '模型',
++    'MORE RENODX CONTROLS': '更多 RenoDX 控制',
++    'NR STYLE': 'NR 风格',
++    'FEEDER CONTROLS': 'FEEDER 控制',
++    'DEVELOPER MASKING': '开发者遮罩',
++    'MODEL AUTOMASK': '模型自动遮罩',
++    'CHARACTER MASK': '角色遮罩',
++    'RenoDX character mask': 'RenoDX 角色遮罩',
++    'SDK required': '需要 SDK',
++    'Demo groups': '演示分组',
++    'Preview selection': '预览选择',
++    // demo group names in the design preview
++    Pitcher: '水罐', Grapes: '葡萄', Bottles: '瓶子',
++    // ---- panel buttons and notes ---------------------------------------
++    'Live tools': '实时工具', 'DLSS controls': 'DLSS 控制',
++    'Show RenoDX extras': '显示 RenoDX 附加项', 'Show Feeder controls': '显示 Feeder 控制',
++    'Preview: Feeder + RenoDX': '预览：Feeder + RenoDX', 'Preview: RenoDX': '预览：RenoDX',
++    Unavailable: '不可用',
++    'ReShade shader effects': 'ReShade 着色器效果',
++    'No separate .fx shader controls found. RenoDX controls above do not require .fx shaders.':
++      '未发现独立的 .fx 着色器控件。上面的 RenoDX 控件不需要 .fx 着色器。',
++    'Restart DLSS 5 Swapper and connect the updated overlay to load RenoDX controls.':
++      '重启 DLSS 5 Swapper 并连接新版叠加层，即可加载 RenoDX 控件。',
++    'Design preview; no game connection.': '设计预览；未连接游戏。',
++    'RenoDX controls use its original callback. FX controls below are separate. Experimental adapter; original tool windows remain available.':
++      'RenoDX 控件走它自己的回调；下面的 FX 控件是独立的。适配器为实验性，原始工具窗口仍可使用。',
++    'Waiting for compatible RenoDX. FX controls do not control DLSS.':
++      '等待兼容的 RenoDX。FX 控件不控制 DLSS。',
++    'Waiting for the verified RenoDX build. Connection is automatic; a build this overlay does not know is refused. Original tools remain available.':
++      '等待已验证的 RenoDX 版本。连接是自动的；本叠加层不认识的版本会被拒绝。原始工具仍可使用。',
++    'Live RenoDX settings. A/B/C select NR Style, not AI models. Scroll More Controls; click a number to type. Home keeps the original tools available.':
++      '实时 RenoDX 设置。A/B/C 选的是 NR 风格，不是 AI 模型。向下滚动查看更多控件；点数字可直接输入。Home 可打开原始工具。',
++    'Interactive design preview only. Changes here do not affect a game. The installed overlay connects automatically to the verified RenoDX build.':
++      '仅为交互式设计预览，此处修改不会影响游戏。已安装的叠加层会自动连接已验证的 RenoDX 版本。',
++    'On-screen status card': '游戏内状态角标',
++    'Design inspired by the NVIDIA reference. Masking, models and DLSS sliders are not connected to the SDK.':
++      '设计参考 NVIDIA 官方界面。遮罩、模型与 DLSS 滑块未接入 SDK。',
++    // ---- RenoDX controls (labels sent by the add-on) --------------------
++    'Structure Intensity': '结构强度',
++    'Tone Intensity': '色调强度',
++    Model: '模型',
++    'Global Tone Intensity': '全局色调强度',
++    'Enable DLSS Neural Rendering': '启用 DLSS 神经渲染',
++    'Automatic / Character Mask': '自动 / 角色遮罩',
++    'Character/Skin Structure': '角色 / 皮肤结构',
++    'Overall Intensity': '整体强度',
++    'Local Tone Intensity': '局部色调强度',
++    'Diffuse White (nits)': '漫反射白点（nit）',
++    'Motion Scale X Multiplier': '运动缩放 X 倍率',
++    'Motion Scale Y Multiplier': '运动缩放 Y 倍率',
++    'NR UI Correction': 'NR 界面校正',
++    'Enable Upscaling (WIP)': '启用超分（实验）',
++    'NR Preset': 'NR 预设',
++    'NR Style': 'NR 风格',
++    'Depth Convention': '深度约定',
++    // ---- Feeder controls (labels sent by the add-on) --------------------
++    'Feeder enabled (original panel)': 'Feeder 总开关（原始面板）',
++    'Work resolution (%)': '工作分辨率（%）',
++    'Work sharpness': '工作锐度',
++    'Motion scale X': '运动缩放 X',
++    'Motion scale Y': '运动缩放 Y',
++    'HDR contract': 'HDR 契约',
++    'Depth convention': '深度约定',
++    'Depth convention (-1 auto, 0 normal, 1 inverted)': '深度约定（-1 自动，0 正常，1 反转）',
++    'Work upscale': '工作分辨率超分',
++    'Upscale (0 bilinear, 1 FSR1, 2 DLSS SR)': '超分方式（0 双线性，1 FSR1，2 DLSS SR）',
++    'HDR10 bridge': 'HDR10 桥接',
++    'HDR10 bridge (-1 auto, 0 off, 1 on)': 'HDR10 桥接（-1 自动，0 关，1 开）',
++    'HDR paper white (nits)': 'HDR 纸白亮度（nit）',
++    'Output stabiliser hold': '输出稳定保持',
++    'Stabiliser change tolerance': '稳定变化容差',
++    // ---- dropdown values (shown, never compared) ------------------------
++    Default: '默认', Natural: '自然', Cinematic: '电影感',
++    'Preset #1': '预设 #1', 'Preset #2': '预设 #2', 'Preset #3': '预设 #3',
++    Auto: '自动', Off: '关', On: '开', Normal: '正常', Inverted: '反转',
++    'Force SDR': '强制 SDR', 'Force HDR': '强制 HDR', Bilinear: '双线性',
++    'DLSS SR (experimental)': 'DLSS SR（实验）',
++    'Use game NGX flag': '使用游戏 NGX 标记',
++    'Force normal depth': '强制正常深度',
++    'Force inverted depth': '强制反转深度',
++    // ---- status / reasons reported by the add-on ------------------------
++    'Bridge is off': '桥接已关闭',
++    'RenoDX is not loaded': 'RenoDX 未加载',
++    'Unsupported RenoDX binary; this build drives RenoDX 6.5.3 and v4.7':
++      '不支持的 RenoDX 版本；本版本适配 RenoDX 6.5.3 与 v4.7',
++    'Unexpected ImGui interface; bridge refused': 'ImGui 接口不符合预期，桥接已拒绝',
++    'RenoDX code fingerprint mismatch': 'RenoDX 代码指纹不匹配',
++    'UI dispatch changed; bridge refused': 'UI 分发方式已改变，桥接已拒绝',
++    'RenoDX controls unavailable': 'RenoDX 控件不可用',
++    'RenoDX controls unavailable.': 'RenoDX 控件不可用。',
++    'Feeder is not loaded': 'Feeder 未加载',
++    'Unsupported Feeder binary (this build drives x64 v1.17.0)':
++      '不支持的 Feeder 版本（本版本适配 x64 v1.17.0）',
++    'Feeder config unavailable; let Feeder initialize': 'Feeder 配置不可用，请先让 Feeder 完成初始化',
++    'Feeder cfg changed or write failed; retry': 'Feeder 配置被改动或写入失败，请重试',
++    'Design preview only. Feeder cfg controls; work resolution, filter and sharpness require DX11.':
++      '仅为设计预览。Feeder 配置项：工作分辨率、滤镜与锐度需要 DX11。',
++    'Feeder cfg reloads every 60 delivered frames. Work resolution/filter/sharpness and the HDR10 bridge: DX11 only. NR is separate.':
++      'Feeder 每交付 60 帧重载一次配置。工作分辨率 / 滤镜 / 锐度与 HDR10 桥接仅在 DX11 生效；NR 是独立通道。',
++    'Enable Feeder and select an active mode in its original page. Disabled/inert Feeder does not reload cfg.':
++      '请先在 Feeder 原始页面启用并选择生效模式；关闭或未生效时不会重载配置。',
++    'DLSS 5 Swapper must remain open. Waiting for the shared panel design (one test game at a time)...':
++      'DLSS 5 Swapper 必须保持运行。正在等待共享面板…（同一时间只支持一个测试游戏）',
++    'The renderer could not create the panel surface.': '渲染器无法创建面板画面。',
++    // ---- Overlay page (main window) -------------------------------------
++    Overlay: '叠加层',
++    'Choose your style. Preview it, then make it yours.': '选择你的风格，先预览，再定下来。',
++    'Install overlay with DLSS': '安装 DLSS 时一并安装叠加层',
++    '＋ Add Overlay': '＋ 添加叠加层',
++    Hotkey: '热键',
++    'Developer files': '开发者文件',
++    Emerald: '翡翠绿', Azure: '蔚蓝', Amethyst: '紫水晶',
++    '✓ Selected': '✓ 已选', Select: '选择', '◉ Preview': '◉ 预览',
++    'Delete this theme': '删除该主题',
++    'Custom native overlay: browser preview unavailable. Only test trusted files.':
++      '外部原生叠加层：无法在浏览器中预览，请只测试可信文件。',
++    'Install separately': '单独安装', Remove: '移除',
++    'Existing installations': '已有安装', 'Remove overlay only': '仅移除叠加层',
++    'Saved.': '已保存。', 'Done.': '完成。',
++    'Create a theme': '创建主题',
++    "Pick an accent colour. The panel's other shades are derived from it.":
++      '选一个强调色，面板的其他色调由它推导。',
++    Colour: '颜色', Name: '名称', Cancel: '取消', Save: '保存',
++    'Give the theme a name.': '请给主题起个名字。', 'My theme': '我的主题',
++    'Overlay hotkey': '叠加层热键',
++    'Click the field, then press your shortcut. Ctrl, Alt and Shift are supported. Home / Escape stay reserved for ReShade.':
++      '点一下输入框再按快捷键。支持 Ctrl、Alt、Shift；Home 与 Esc 保留给 ReShade。',
++    'Demo preview': '演示预览',
++    'Interactive demo · no game changes': '交互演示 · 不会修改游戏',
++    'Reserved / unsupported key. Try F9 or Ctrl + Shift + O.':
++      '保留键或不支持的按键，试试 F9 或 Ctrl + Shift + O。',
++    'Overlay service is not running. Restart DLSS 5 Swapper, then press the hotkey in game.':
++      '叠加层服务未运行。重启 DLSS 5 Swapper 后在游戏内按热键。',
++    'Overlay service connected to a running game.': '叠加层服务已连接到正在运行的游戏。',
++    'Overlay service ready, waiting for a game. Keep DLSS 5 Swapper open and press the hotkey in game.':
++      '叠加层服务已就绪，等待游戏接入。保持 DLSS 5 Swapper 运行并在游戏内按热键。',
++  };
++
++  // The footer line is the one string the panel builds from a hotkey name.
++  const ZH_FOOTER = '{0}：显示 / 隐藏 · 拖动标题栏移动 · Esc 关闭 · Home 打开原始工具';
++  const EN_FOOTER = '{0}: show/hide · Drag header: move · Esc: close · Home: original tools';
++
++  let runtimeLang = null;
++  const listeners = [];
++  const current = () => {
++    if (window.i18n?.getLang) return window.i18n.getLang() || 'en';
++    return runtimeLang || 'en';
++  };
++  const isChinese = () => String(current()).toLowerCase().startsWith('zh');
++  const OT = (en) => {
++    const text = String(en);
++    if (!isChinese()) return text;
++    return Object.prototype.hasOwnProperty.call(ZH, text) ? ZH[text] : text;
++  };
++  const hotkeyFooter = (hotkey) => (isChinese() ? ZH_FOOTER : EN_FOOTER).replace('{0}', hotkey || 'F8');
++
++  window.overlayI18n = {
++    OT,
++    hotkeyFooter,
++    lang: current,
++    isChinese,
++    // From the panel window's IPC channel. Announced before anything renders.
++    set(code) {
++      const next = String(code || 'en');
++      if (next === runtimeLang) return;
++      runtimeLang = next;
++      for (const fn of listeners) fn(next);
++    },
++    onChange(fn) { listeners.push(fn); },
++    strings: ZH,
++  };
++})();
+diff --git a/src/renderer/overlay-live.js b/src/renderer/overlay-live.js
+index f1ee7e3..0736b22 100644
+--- a/src/renderer/overlay-live.js
++++ b/src/renderer/overlay-live.js
+@@ -3,6 +3,7 @@
+ // edits stay in this closure and never call IPC or alter a game's settings.
+ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+   root._overlayDispose?.();
++  const ot = window.overlayI18n.OT;
+   const lifetime = new AbortController();
+   const runtime = designOnly ? null : window.overlayRuntime;
+   const sample = { epoch:1, nrAvailable:true, nrEnabled:true, effects:true, tools:[], nrTools:[
+@@ -19,8 +20,8 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+   let status = sample, epoch = 0, preview = true, connectedOnce = false, autoEpoch = 0;
+   // Only reasons worth reading. While the bridge works the badge in the
+   // header already says CONNECTED, so the line below it stays out of sight.
+-  const nrNote = () => !status ? 'Waiting for game connection'
+-    : status.nrAvailable ? '' : status.nrReason || 'RenoDX controls unavailable.';
++  const nrNote = () => !status ? ot('Waiting for game connection')
++    : status.nrAvailable ? '' : ot(status.nrReason || 'RenoDX controls unavailable.');
+   const observer = new ResizeObserver(() => runtime?.resize(Math.ceil(root.getBoundingClientRect().height)));
+   observer.observe(root);
+   root._overlayDispose = () => { lifetime.abort(); observer.disconnect(); };
+@@ -40,10 +41,10 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+     const close=()=>{menu.hidden=true;trigger.setAttribute('aria-expanded','false');};
+     trigger.updateChoice = tool => {
+       const options=tool.options||t.options||[];
+-      trigger.textContent=options[tool.value-t.min]||'Unavailable';
++      trigger.textContent=ot(options[tool.value-t.min]||'Unavailable');
+       if(JSON.stringify(options)!==menu.dataset.options) {
+         menu.dataset.options=JSON.stringify(options);menu.replaceChildren(...options.map((text,i)=>{
+-          const option=el('button','ol-dropdown-option',text);option.type='button';option.dataset.value=i+t.min;option.setAttribute('role','option');
++          const option=el('button','ol-dropdown-option',ot(text));option.type='button';option.dataset.value=i+t.min;option.setAttribute('role','option');
+           option.onclick=()=>{send(t.id,t.kind,i+t.min);close();trigger.focus({preventScroll:true});};return option;
+         }));
+       }
+@@ -90,23 +91,23 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+     if(feedChoices[t.id])t={...t,options:feedChoices[t.id],name:{306:'HDR contract',307:'Depth convention',308:'Work upscale',309:'HDR10 bridge'}[t.id]};
+     const isChoice=t.kind===4||!!t.options;
+     const row = el(isChoice?'div':'label', isChoice?'ol-choice':t.kind===0?'ol-slider':'ol-check ol-live-toggle');
+-    row.title = `${t.effect || 'ReShade'} / ${t.name}`;
+-    if(isChoice){row.append(el('span','',t.name),choice(t));target.append(row);return;}
++    row.title = `${t.effect || 'ReShade'} / ${ot(t.name)}`;
++    if(isChoice){row.append(el('span','',ot(t.name)),choice(t));target.append(row);return;}
+     const input = el('input', ''); input.dataset.liveId = t.id;
+     if (t.kind === 0) {
+       input.type = 'range'; input.min = t.min; input.max = t.max; input.step = t.step;
+-      row.append(el('span', '', t.name), input, el('output', '', ''));
++      row.append(el('span', '', ot(t.name)), input, el('output', '', ''));
+       editable(input);
+-    } else { input.type = 'checkbox'; row.append(input, el('span', '', t.name)); }
++    } else { input.type = 'checkbox'; row.append(input, el('span', '', ot(t.name))); }
+     input.addEventListener('input', () => send(t.id, t.kind, [0, 4].includes(t.kind) ? Number(input.value) : Number(input.checked)));
+     target.append(row);
+   }
+   function bindNr(panel) {
+     for (const control of panel.querySelectorAll('input, button')) control.disabled = true;
+-    panel.querySelector('.ol-master small').textContent = status===sample?'Preview only':status?.nrAvailable ? 'RenoDX live' : 'Waiting for RenoDX';
++    panel.querySelector('.ol-master small').textContent = ot(status===sample?'Preview only':status?.nrAvailable ? 'RenoDX live' : 'Waiting for RenoDX');
+     const badgeNote = panel.querySelector('.ol-badge small');
+-    if (badgeNote) badgeNote.textContent = status===sample ? 'Preview only' : 'Shows DLSS 5 On/Off over the game';
+-    panel.querySelector('.ol-prototype').textContent = status===sample?'PREVIEW':status?.nrAvailable ? 'CONNECTED' : 'NOT CONNECTED';
++    if (badgeNote) badgeNote.textContent = ot(status===sample ? 'Preview only' : 'Shows DLSS 5 On/Off over the game');
++    panel.querySelector('.ol-prototype').textContent = ot(status===sample?'PREVIEW':status?.nrAvailable ? 'CONNECTED' : 'NOT CONNECTED');
+     const mapping = [[panel.querySelector('#olStructure'), 101], [panel.querySelector('#olTone'), 102],
+       [panel.querySelector('.ol-master input'), 103], [panel.querySelector('.ol-badge input'), 50],
+       [panel.querySelector('.ol-muted input[type=checkbox]'), 104],
+@@ -116,20 +117,22 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+       input.addEventListener('input', () => send(id, input.type === 'range' ? 0 : 1, input.type === 'range' ? Number(input.value) : Number(input.checked)));
+       if (input.type === 'range') editable(input);
+     }
+-    panel.querySelector('.ol-muted .ol-check small').textContent = 'RenoDX character mask';
++    panel.querySelector('.ol-muted .ol-check small').textContent = ot('RenoDX character mask');
+     const maskLabel = panel.querySelector('.ol-muted .ol-check');
+-    for (const node of maskLabel.childNodes) if (node.nodeType === Node.TEXT_NODE && node.textContent.includes('MODEL AUTOMASK')) node.textContent = ' CHARACTER MASK ';
++    // Keyed by class, not by the English wording: this label is translated now.
++    const maskTag = maskLabel.querySelector('.ol-mask-tag');
++    if (maskTag) maskTag.textContent = ot('CHARACTER MASK');
+     panel.querySelector('.ol-muted').classList.toggle('ol-muted', !status?.nrAvailable);
+-    panel.querySelector('#olMaskStructure').previousElementSibling.textContent = 'Character/Skin Structure';
++    panel.querySelector('#olMaskStructure').previousElementSibling.textContent = ot('Character/Skin Structure');
+     const extra = panel.querySelector('.ol-group').parentElement;
+-    extra.replaceChildren(el('h4', '', 'MORE RENODX CONTROLS'));
++    extra.replaceChildren(el('h4', '', ot('MORE RENODX CONTROLS')));
+     const tools = el('div', 'ol-additional'); extra.append(tools);
+     for (const t of status?.nrTools || []) if (![101, 102, 103, 104, 105, 114].includes(t.id)) addTool(tools, t);
+-    if (!status?.nrTools) tools.append(el('p', 'ol-live-note', 'Restart DLSS 5 Swapper and connect the updated overlay to load RenoDX controls.'));
++    if (!status?.nrTools) tools.append(el('p', 'ol-live-note', ot('Restart DLSS 5 Swapper and connect the updated overlay to load RenoDX controls.')));
+     const models = panel.querySelector('.ol-models');
+-    models.parentElement.querySelector('h4').textContent = 'NR STYLE';
++    models.parentElement.querySelector('h4').textContent = ot('NR STYLE');
+     for (const [i, model] of [...models.children].entries()) {
+-      model.textContent = `Model ${['A', 'B', 'C'][i]} · ${['Default', 'Natural', 'Cinematic'][i]}`;
++      model.textContent = `${ot('Model')} ${['A', 'B', 'C'][i]} · ${ot(['Default', 'Natural', 'Cinematic'][i])}`;
+       model.dataset.styleValue = i;
+       model.onclick = () => send(114, 4, i);
+       model.classList.remove('selected'); model.setAttribute('aria-pressed', 'false');
+@@ -139,16 +142,16 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+     if(status?.feedPresent){
+       const section=el('section','ol-feed-section');section.append(el('h4','','FEEDER CONTROLS'));
+       const feed=el('div','ol-additional');for(const t of status.feedTools||[])addTool(feed,t);
+-      section.append(feed,el('p','ol-live-note ol-feed-status',status.feedReason));
++      section.append(feed,el('p','ol-live-note ol-feed-status',ot(status.feedReason)));
+       extra.after(section);
+       // Keep the compact panel bounded: choose a backend section instead of
+       // stacking two tall scroll areas. NR remains accessible above.
+-      const toggle=el('button','ol-model','Show RenoDX extras');extra.before(toggle);extra.hidden=true;
+-      toggle.onclick=()=>{extra.hidden=!extra.hidden;section.hidden=!extra.hidden;toggle.textContent=extra.hidden?'Show RenoDX extras':'Show Feeder controls';};
++      const toggle=el('button','ol-model',ot('Show RenoDX extras'));extra.before(toggle);extra.hidden=true;
++      toggle.onclick=()=>{extra.hidden=!extra.hidden;section.hidden=!extra.hidden;toggle.textContent=ot(extra.hidden?'Show RenoDX extras':'Show Feeder controls');};
+     }
+-    panel.querySelector('footer').textContent = status===sample?'Interactive design preview only. Changes here do not affect a game. The installed overlay connects automatically to the verified RenoDX build.':status?.nrAvailable
++    panel.querySelector('footer').textContent = ot(status===sample?'Interactive design preview only. Changes here do not affect a game. The installed overlay connects automatically to the verified RenoDX build.':status?.nrAvailable
+       ? 'Live RenoDX settings. A/B/C select NR Style, not AI models. Scroll More Controls; click a number to type. Home keeps the original tools available.'
+-      : 'Waiting for the verified RenoDX build. Connection is automatic; a build this overlay does not know is refused. Original tools remain available.';
++      : 'Waiting for the verified RenoDX build. Connection is automatic; a build this overlay does not know is refused. Original tools remain available.');
+   }
+   function build() {
+     window.mountOverlayPanel(root);
+@@ -156,14 +159,14 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+     panel.classList.add('ol-connected');
+     const modes = el('div', 'ol-models ol-live-modes');
+     for (const [label, design] of [['Live tools', false], ['DLSS controls', true]]) {
+-      const b = el('button', `ol-model ${preview === design ? 'selected' : ''}`, label);
++      const b = el('button', `ol-model ${preview === design ? 'selected' : ''}`, ot(label));
+       b.onclick = () => { preview = design; build(); update(); }; modes.append(b);
+     }
+     // Preserve the requested panel itself; optional FX tools never replace it
+     // automatically and are not presented as a RenoDX connection.
+     panel.after(modes);
+     if(designOnly){
+-      const backend=el('button','ol-preview-backend',sample.feedPresent?'Preview: Feeder + RenoDX':'Preview: RenoDX');
++      const backend=el('button','ol-preview-backend',ot(sample.feedPresent?'Preview: Feeder + RenoDX':'Preview: RenoDX'));
+       backend.onclick=()=>{
+         sample.feedPresent=!sample.feedPresent;
+         sample.feedReason='Design preview only. Feeder cfg controls; work resolution, filter and sharpness require DX11.';
+@@ -175,10 +178,10 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+     }
+     if(status!==sample){const note=el('p','ol-live-note ol-nr-status',nrNote());note.hidden=!note.textContent;modes.after(note);}
+     if (preview) { bindNr(panel); return; }
+-    panel.querySelector('.ol-prototype').textContent = status ? 'LIVE RESHADE' : 'DISCONNECTED';
+-    panel.querySelector('.ol-eyebrow').textContent = 'DLSS 5 SWAPPER · INJECTED TOOLS';
++    panel.querySelector('.ol-prototype').textContent = ot(status ? 'LIVE RESHADE' : 'DISCONNECTED');
++    panel.querySelector('.ol-eyebrow').textContent = ot('DLSS 5 SWAPPER · INJECTED TOOLS');
+     for (const element of [...panel.children]) if (element !== modes && element.tagName !== 'HEADER') element.remove();
+-    const info = el('p', 'ol-live-note', status===sample?'Design preview; no game connection.':status?.nrAvailable ? 'RenoDX controls use its original callback. FX controls below are separate. Experimental adapter; original tool windows remain available.' : 'Waiting for compatible RenoDX. FX controls do not control DLSS.');
++    const info = el('p', 'ol-live-note', ot(status===sample?'Design preview; no game connection.':status?.nrAvailable ? 'RenoDX controls use its original callback. FX controls below are separate. Experimental adapter; original tool windows remain available.' : 'Waiting for compatible RenoDX. FX controls do not control DLSS.'));
+     panel.append(info);
+     const tools = el('div', 'ol-live-tools'); panel.append(tools);
+     const add = t => addTool(tools, t);
+@@ -188,12 +191,12 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+       if (t.effect !== previousEffect) { tools.append(el('h4', 'ol-live-effect', t.effect)); previousEffect = t.effect; }
+       add(t);
+     }
+-    if (!status?.tools.length) tools.append(el('p', 'ol-live-note', 'No separate .fx shader controls found. RenoDX controls above do not require .fx shaders.'));
+-    panel.append(el('footer', 'ol-live-hotkey', `${root.dataset.overlayHotkey||'F8'}: show/hide · Drag header: move · Esc: close · Home: original tools`));
++    if (!status?.tools.length) tools.append(el('p', 'ol-live-note', ot('No separate .fx shader controls found. RenoDX controls above do not require .fx shaders.')));
++    panel.append(el('footer', 'ol-live-hotkey', window.overlayI18n.hotkeyFooter(root.dataset.overlayHotkey||'F8')));
+   }
+   function update() {
+     const note = root.querySelector('.ol-nr-status'); if (note) { note.textContent = nrNote(); note.hidden = !note.textContent; }
+-    const feedNote=root.querySelector('.ol-feed-status');if(feedNote)feedNote.textContent=status?.feedReason||'';
++    const feedNote=root.querySelector('.ol-feed-status');if(feedNote)feedNote.textContent=ot(status?.feedReason||'');
+     for (const input of root.querySelectorAll('[data-live-id]')) {
+       const id = Number(input.dataset.liveId);
+       const t = id >= 301 ? status?.feedPresent&&status.feedTools?.find(t=>t.id===id) : id === 0 ? { kind: 3, value: status?.effects ? 1 : 0, available: !!status } :
+@@ -203,7 +206,7 @@ window.mountOverlayLive = (root, { designOnly = false } = {}) => {
+         id >= 101 ? status?.nrAvailable && status.nrTools?.find(t => t.id === id) : status?.tools.find(t => t.id === id);
+       input.disabled = !t?.available;
+       if (!t || input.dataset.dragging || (document.activeElement === input && input.type === 'number')) continue;
+-      input.title = `${t.effect} / ${t.name}`;
++      input.title = `${t.effect} / ${ot(t.name)}`;
+       if (input.type === 'range' || input.type === 'number') { input.min = t.min; input.max = t.max; input.step = t.step; input.value = Number(t.value).toFixed(2); }
+       else if(input.updateChoice) input.updateChoice(t);
+       else input.checked = !!t.value;
+diff --git a/src/renderer/overlay-panel.html b/src/renderer/overlay-panel.html
+index d322f6a..81b1bef 100644
+--- a/src/renderer/overlay-panel.html
++++ b/src/renderer/overlay-panel.html
+@@ -8,5 +8,5 @@
+   <link rel="stylesheet" href="overlay-controls.css">
+   <link rel="stylesheet" href="overlay-surface.css">
+ </head>
+-<body><div id="panel" data-overlay-theme="green"></div><script src="overlay-panel.js"></script><script src="overlay-live.js"></script><script src="overlay-surface.js"></script></body>
++<body><div id="panel" data-overlay-theme="green"></div><script src="overlay-i18n.js"></script><script src="overlay-panel.js"></script><script src="overlay-live.js"></script><script src="overlay-surface.js"></script></body>
+ </html>
+diff --git a/src/renderer/overlay-panel.js b/src/renderer/overlay-panel.js
+index 0bd1821..72db22c 100644
+--- a/src/renderer/overlay-panel.js
++++ b/src/renderer/overlay-panel.js
+@@ -57,17 +57,18 @@ window.bindOverlayRanges = root => {
+ };
+ // One DOM for the the preview AND the in-game Chromium surface. No native
+ // reconstruction of controls: their metrics, fonts and behavior stay identical.
+-window.mountOverlayPanel = (root, footer = 'Design inspired by the NVIDIA reference. Masking, models and DLSS sliders are not connected to the SDK.') => {
++window.mountOverlayPanel = (root, footer = window.overlayI18n.OT('Design inspired by the NVIDIA reference. Masking, models and DLSS sliders are not connected to the SDK.')) => {
++  const ot = window.overlayI18n.OT;
+   const slider = (id, label, value) => `<label class="ol-slider" for="${id}"><span>${label}</span><input id="${id}" type="range" min="0" max="1" step="0.01" value="${value}"/><output for="${id}">${value.toFixed(2)}</output></label>`;
+   root.innerHTML = `<div class="ol-panel" dir="ltr">
+-    <header><span class="ol-eyebrow">DLSS 5 SWAPPER CONTROLS</span><span class="ol-prototype">PREVIEW</span></header>
+-    <label class="ol-check ol-master"><input type="checkbox" checked/> DLSS ON <small>Preview only</small></label>
+-    <label class="ol-check ol-badge"><input type="checkbox"/> ON-SCREEN STATUS <small>Shows DLSS 5 On/Off over the game</small></label>
+-    <section><h4>GLOBAL CONTROLS</h4>${slider('olStructure', 'Structure Intensity', .38)}${slider('olTone', 'Tone Intensity', .28)}</section>
+-    <section class="ol-muted"><label class="ol-check"><input type="checkbox" disabled/> MODEL AUTOMASK <small>SDK required</small></label>${slider('olMaskStructure', 'Structure Intensity', 1)}</section>
+-    <section><label class="ol-check"><input type="checkbox" checked/> DEVELOPER MASKING <small>Demo groups</small></label>
+-      ${[['Pitcher', .45, .35], ['Grapes', 1, 1], ['Bottles', 1, 1]].map(([label, structure, tone], i) => `<div class="ol-group"><label class="ol-check"><input type="checkbox" checked/> ${label}</label>${slider(`olGroup${i}s`, 'Structure Intensity', structure)}${slider(`olGroup${i}t`, 'Tone Intensity', tone)}</div>`).join('')}
+-    </section><section><h4>MODELS <small>Preview selection</small></h4><div class="ol-models">${['A', 'B', 'C'].map((m, i) => `<button class="ol-model ${i ? '' : 'selected'}" aria-pressed="${!i}">Model ${m}</button>`).join('')}</div></section>
++    <header><span class="ol-eyebrow">${ot('DLSS 5 SWAPPER CONTROLS')}</span><span class="ol-prototype">${ot('PREVIEW')}</span></header>
++    <label class="ol-check ol-master"><input type="checkbox" checked/> ${ot('DLSS ON')} <small>${ot('Preview only')}</small></label>
++    <label class="ol-check ol-badge"><input type="checkbox"/> ${ot('ON-SCREEN STATUS')} <small>${ot('Shows DLSS 5 On/Off over the game')}</small></label>
++    <section><h4>${ot('GLOBAL CONTROLS')}</h4>${slider('olStructure', ot('Structure Intensity'), .38)}${slider('olTone', ot('Tone Intensity'), .28)}</section>
++    <section class="ol-muted"><label class="ol-check"><input type="checkbox" disabled/> <span class="ol-mask-tag">${ot('MODEL AUTOMASK')}</span> <small>${ot('SDK required')}</small></label>${slider('olMaskStructure', ot('Structure Intensity'), 1)}</section>
++    <section><label class="ol-check"><input type="checkbox" checked/> ${ot('DEVELOPER MASKING')} <small>${ot('Demo groups')}</small></label>
++      ${[['Pitcher', .45, .35], ['Grapes', 1, 1], ['Bottles', 1, 1]].map(([label, structure, tone], i) => `<div class="ol-group"><label class="ol-check"><input type="checkbox" checked/> ${ot(label)}</label>${slider(`olGroup${i}s`, ot('Structure Intensity'), structure)}${slider(`olGroup${i}t`, ot('Tone Intensity'), tone)}</div>`).join('')}
++    </section><section><h4>${ot('MODELS')} <small>${ot('Preview selection')}</small></h4><div class="ol-models">${['A', 'B', 'C'].map((m, i) => `<button class="ol-model ${i ? '' : 'selected'}" aria-pressed="${!i}">${ot('Model')} ${m}</button>`).join('')}</div></section>
+     <footer></footer></div>`;
+   root.querySelector('footer').textContent = footer;
+   root.querySelector('#olMaskStructure').disabled = true;
+diff --git a/src/renderer/overlay-surface.js b/src/renderer/overlay-surface.js
+index e7b6827..6d1170b 100644
+--- a/src/renderer/overlay-surface.js
++++ b/src/renderer/overlay-surface.js
+@@ -1,9 +1,19 @@
+ 'use strict';
+-window.mountOverlayPanel(document.getElementById('panel'));
+-window.mountOverlayLive(document.getElementById('panel'));
+-window.overlayRuntime.onPreferences(value=>{
+- const root=document.getElementById('panel');window.applyOverlayTheme(root,value);
+- const k=value.hotkey.key,name=k>=112?`F${k-111}`:({32:'Space',33:'PageUp',34:'PageDown',35:'End',37:'Left',38:'Up',39:'Right',40:'Down',45:'Insert',46:'Delete'}[k]||String.fromCharCode(k));
+- root.dataset.overlayHotkey=[value.hotkey.mods&1?'Ctrl':'',value.hotkey.mods&2?'Alt':'',value.hotkey.mods&4?'Shift':'',name].filter(Boolean).join(' + ');
+- const footer=root.querySelector('.ol-live-hotkey');if(footer)footer.textContent=`${root.dataset.overlayHotkey}: show/hide · Drag header: move · Esc: close · Home: original tools`;
+-});
++// The in-game surface. Its language arrives over IPC (the add-on's window has
++// no i18n.js), and a change has to re-mount: every label is built once when
++// the panel is assembled.
++const root = document.getElementById('panel');
++let preferences = null;
++function paint() {
++  if (!preferences) return;
++  window.applyOverlayTheme(root, preferences);
++  const k = preferences.hotkey.key;
++  const name = k >= 112 ? `F${k - 111}` : ({ 32: 'Space', 33: 'PageUp', 34: 'PageDown', 35: 'End', 37: 'Left', 38: 'Up', 39: 'Right', 40: 'Down', 45: 'Insert', 46: 'Delete' }[k] || String.fromCharCode(k));
++  root.dataset.overlayHotkey = [preferences.hotkey.mods & 1 ? 'Ctrl' : '', preferences.hotkey.mods & 2 ? 'Alt' : '', preferences.hotkey.mods & 4 ? 'Shift' : '', name].filter(Boolean).join(' + ');
++  const footer = root.querySelector('.ol-live-hotkey');
++  if (footer) footer.textContent = window.overlayI18n.hotkeyFooter(root.dataset.overlayHotkey);
++}
++function mount() { window.mountOverlayPanel(root); window.mountOverlayLive(root); paint(); }
++window.overlayRuntime.onPreferences(value => { preferences = value; paint(); });
++window.overlayRuntime.onLanguage(code => { window.overlayI18n.set(code); mount(); });
++mount();
+diff --git a/src/renderer/renderer.js b/src/renderer/renderer.js
+index a1d3036..f226df3 100644
+--- a/src/renderer/renderer.js
++++ b/src/renderer/renderer.js
+@@ -665,12 +665,12 @@ async function load() {
+   state.newDlss = (await window.lab.details(state.games[0] ? state.games[0].dir : '')).newDlss;
+   renderGames();
+   renderRecent();
+-  log(`Found ${state.games.length} games across ${new Set(state.games.map((g) => g.launcher)).size} sources`);
++  log(t('logFound', state.games.length, new Set(state.games.map((g) => g.launcher)).size));
+   await scanAll();
+ }
+ 
+ async function pickGame(dir) {
+-  log(`Scanning: ${dir}`);
++    log(t('logScanning', dir));
+   const cached = await window.lab.scan(dir);
+   let game = state.games.find((g) => g.dir === dir);
+   if (!game) {
+@@ -681,7 +681,7 @@ async function pickGame(dir) {
+   if (game) {
+     game.cached = cached;
+     renderGames();
+-    log(`Game: ${cached.exe || '—'} (${cached.api || 'unknown'})`);
++    log(t('logGame', cached.exe || '—', cached.api || 'unknown'));
+     openSheet(dir);
+   }
+ }
+@@ -1157,7 +1157,7 @@ async function runJob(kind, dir) {
+ 
+   if (res.ok) {
+     jobLog(kind === 'install' ? `done - ${res.replaced} replaced, ${res.added} added` : 'done - originals restored');
+-    log(`${kind === 'install' ? 'Installed' : 'Restored'}: ${dir}`);
++    log(t(kind === 'install' ? 'logInstalled' : 'logRestored', dir));
+     if ($('view-history').classList.contains('active')) await renderHistory();
+     // Recent Games tracks what was actually swapped, not what was browsed.
+     state.recents = await window.lab.touch(dir);
