@@ -670,7 +670,7 @@ async function load() {
 }
 
 async function pickGame(dir) {
-    log(t('logScanning', dir));
+  log(t('logScanning', dir));
   const cached = await window.lab.scan(dir);
   let game = state.games.find((g) => g.dir === dir);
   if (!game) {

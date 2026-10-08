@@ -914,7 +914,7 @@ index e7b6827..6d1170b 100644
 +window.overlayRuntime.onLanguage(code => { window.overlayI18n.set(code); mount(); });
 +mount();
 diff --git a/src/renderer/renderer.js b/src/renderer/renderer.js
-index a1d3036..f226df3 100644
+index a1d3036..86193e8 100644
 --- a/src/renderer/renderer.js
 +++ b/src/renderer/renderer.js
 @@ -665,12 +665,12 @@ async function load() {
@@ -928,7 +928,7 @@ index a1d3036..f226df3 100644
  
  async function pickGame(dir) {
 -  log(`Scanning: ${dir}`);
-+    log(t('logScanning', dir));
++  log(t('logScanning', dir));
    const cached = await window.lab.scan(dir);
    let game = state.games.find((g) => g.dir === dir);
    if (!game) {

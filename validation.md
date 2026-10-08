@@ -14,9 +14,11 @@
 
 | 文件 | 大小 | SHA-256 |
 |---|---|---|
-| `dist\DLSS5-Swapper-2.2.9-CN-portable.exe` | 250,852,188 B | `5D59199A63378B62E79BC1DD8D7578CF1AF1E5FE36742652DF1E0D0BE2BFC45E` |
-| `dist\app-64.7z`（exe 内载荷，中间产物） | 250,338,348 B | `07C706E7180D2A423265BE47C4DDFA5143D0F1920A083A146D9C0173D7FA346D` |
-| `work\app\resources\app.asar`（前端代码） | 3,159,823 B | `A18A2E390FAFCF03DF67D0DE4D0340F9E1C6A3A54576B3BF4BED3776ACF2D089` |
+| `dist\DLSS5-Swapper-2.2.9-CN-portable.exe` | 250,852,220 B | `0F58F7084500F14592565DC1002C77CF986189EA9B44723AF6EC298DFE1738AA` |
+| `dist\app-64.7z`（exe 内载荷，中间产物） | 250,338,380 B | `D26BB8F2E93AEBAB599D7AB0733B5E5169C01AE029CCDB6E80A4447AC8304696` |
+| `work\app\resources\app.asar`（前端代码） | 3,159,821 B | `34EFEBAC6D448BDF5865EBDCA40CF4C8B73884AFABBCE70D651673EB2C9AB380` |
+
+> 哈希对应的是**当前交付版本**。此前的构建曾把 `renderer.js` 里一行日志的缩进从 2 空格敲成了 4 空格（纯缩进、无功能差异）；为让"仓库源码 = 交付二进制"完全一致，已修正该缩进并重新构建，因此哈希与早期一次构建不同。
 
 版本信息已写入：ProductName `DLSS 5 Swapper`、FileDescription `DLSS 5 Swapper 2.2.9 portable (Simplified Chinese)`、FileVersion `2.2.9`；图标取自应用自带的 256×256 图标（实测该 PNG 位于 exe 偏移 35800）。
 
@@ -66,7 +68,7 @@
 | B-2 | 无完整性校验拦截 | 读 asar 头部 + `@electron/fuses read` | 无 `integrity` 字段；`EnableEmbeddedAsarIntegrityValidation`、`OnlyLoadAppFromAsar` 均为 Disabled |
 | B-3 | 载荷结构一致 | `7z l` 对比 | 135 文件 / 15 目录，与原包相同 |
 | B-4 | SFX 重新封装 | NSIS 3.13 `makensis`，复用原包的 `nsis7z.dll` | 构建成功，载荷以存储方式嵌入（250,784,747 B in/out，未二次压缩） |
-| B-5 | 交付 exe 内载荷 = 已验证载荷 | `7z x` 取出 exe 内 `app-64.7z` 后比对 SHA-256 | `07C706E7…346D` = `07C706E7…346D`，**完全一致** |
+| B-5 | 交付 exe 内载荷 = 已验证载荷 | `7z x` 取出 exe 内 `app-64.7z` 后比对 SHA-256 | `D26BB8F2…4696` = `D26BB8F2…4696`，**完全一致** |
 | B-6 | 图标与版本信息 | 检查 PNG 是否落入资源区 + 读 `VersionInfo` | 图标存在（偏移 35800）；ProductName/FileVersion 正确 |
 
 ---
